@@ -25,8 +25,8 @@ TELEGRAM_CHAT_ID  = os.environ.get("TELEGRAM_CHAT_ID", "")
 PAPER_MODE        = os.environ.get("PAPER_MODE", "true").lower() == "true"
 
 # ── Strategy settings ────────────────────────────────────────────────────────
-MIN_SCORE         = 7          # Minimum AI score to trade (7+)
-MAX_PAYOUT_DAYS   = 7.0      # Only markets resolving within 3 days
+MIN_SCORE         = 5          # Minimum AI score to trade (7+)
+MAX_PAYOUT_DAYS   = 30.0     # Only markets resolving within 3 days
 MAX_DAILY_LOSSES  = 2          # Stop trading after 2 losses per day
 MAX_OPEN_TRADES   = 3          # Max simultaneous positions
 MAX_TRADE_USDC    = 1.50       # Max $ per trade
