@@ -26,7 +26,7 @@ PAPER_MODE        = os.environ.get("PAPER_MODE", "true").lower() == "true"
 
 # ── Strategy settings ────────────────────────────────────────────────────────
 MIN_SCORE         = 7          # Minimum AI score to trade (7+)
-MAX_PAYOUT_DAYS   = 2.0       # Only markets resolving within 3 days
+MAX_PAYOUT_DAYS   = 7.0      # Only markets resolving within 3 days
 MAX_DAILY_LOSSES  = 2          # Stop trading after 2 losses per day
 MAX_OPEN_TRADES   = 3          # Max simultaneous positions
 MAX_TRADE_USDC    = 1.50       # Max $ per trade
