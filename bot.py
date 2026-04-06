@@ -1,6 +1,7 @@
 """
-Polymarket AI Trading Bot
-Runs 24/7 on Railway. Score 7+ filter, fast payout priority, daily loss guard.
+Polymarket AI Trading Bot v5
+Fixed: uses heuristic scoring directly, no AI over-restriction
+Trades any market with clear edge (one side 60%+)
 """
 
 import os
@@ -9,7 +10,6 @@ import time
 import logging
 import requests
 from datetime import datetime, timezone
-from typing import Optional
 
 logging.basicConfig(
     level=logging.INFO,
@@ -18,23 +18,23 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# ── Config (set these in Railway environment variables) ──────────────────────
+# ── Config ───────────────────────────────────────────────────────────────────
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 TELEGRAM_TOKEN    = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID  = os.environ.get("TELEGRAM_CHAT_ID", "")
 PAPER_MODE        = os.environ.get("PAPER_MODE", "true").lower() == "true"
 
-# ── Strategy settings ────────────────────────────────────────────────────────
-MIN_SCORE         = 3          # Minimum AI score to trade (7+)
-MAX_PAYOUT_DAYS   = 30.0     # Only markets resolving within 3 days
-MAX_DAILY_LOSSES  = 2          # Stop trading after 2 losses per day
-MAX_OPEN_TRADES   = 3          # Max simultaneous positions
-MAX_TRADE_USDC    = 1.50       # Max $ per trade
-MIN_TRADE_USDC    = 0.50       # Min $ per trade
-TAKE_PROFIT_MULT  = 1.55       # Close at 55% gain
-STOP_LOSS_MULT    = 0.50       # Close at 50% loss
-MIN_VOLUME        = 5_000    # Minimum market volume $
-SCAN_INTERVAL     = 50         # Seconds between scans
+# ── Strategy ─────────────────────────────────────────────────────────────────
+MIN_SCORE        = int(os.environ.get("MIN_SCORE", "5"))       # Trade score 5+
+MAX_PAYOUT_DAYS  = float(os.environ.get("MAX_PAYOUT_DAYS", "30"))
+MAX_DAILY_LOSSES = 2
+MAX_OPEN_TRADES  = 3
+MAX_TRADE_USDC   = 1.50
+MIN_TRADE_USDC   = 0.50
+TAKE_PROFIT_MULT = 1.55
+STOP_LOSS_MULT   = 0.50
+MIN_VOLUME       = 5_000
+SCAN_INTERVAL    = 50
 
 # ── State ────────────────────────────────────────────────────────────────────
 state = {
@@ -49,7 +49,6 @@ state = {
 }
 
 
-# ── Telegram notifications ───────────────────────────────────────────────────
 def notify(msg: str):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         log.info(f"[NOTIFY] {msg}")
@@ -64,7 +63,6 @@ def notify(msg: str):
         log.warning(f"Telegram error: {e}")
 
 
-# ── Daily reset ──────────────────────────────────────────────────────────────
 def check_daily_reset():
     today = datetime.now(timezone.utc).date().isoformat()
     if state["today"] != today:
@@ -73,10 +71,9 @@ def check_daily_reset():
         state["daily_losses"]  = 0
         state["daily_stopped"] = False
         state["streak"]        = 0
-        notify("🌅 *New day started* — daily loss counter reset. Bot is trading again!")
+        notify("🌅 *New day* — bot trading again!")
 
 
-# ── Fetch markets from Polymarket ────────────────────────────────────────────
 def fetch_markets() -> list[dict]:
     markets = []
     urls = [
@@ -93,7 +90,6 @@ def fetch_markets() -> list[dict]:
                     continue
                 seen.add(m["id"])
 
-                # Parse outcome prices
                 op = m.get("outcomePrices", "[0.5,0.5]")
                 if isinstance(op, str):
                     try:
@@ -103,136 +99,91 @@ def fetch_markets() -> list[dict]:
                 yes_p = float(op[0]) if len(op) > 0 else 0.5
                 no_p  = float(op[1]) if len(op) > 1 else 0.5
 
-                # Hours until resolution
-                end_date = m.get("endDate")
+                end_date   = m.get("endDate")
                 hours_left = 9999.0
                 if end_date:
                     try:
-                        end_dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
-                        diff = (end_dt - datetime.now(timezone.utc)).total_seconds()
+                        end_dt     = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+                        diff       = (end_dt - datetime.now(timezone.utc)).total_seconds()
                         hours_left = max(0.0, diff / 3600)
                     except Exception:
                         pass
 
                 volume = float(m.get("volume") or 0)
-
                 if hours_left < 0.5 or volume < MIN_VOLUME:
                     continue
 
                 markets.append({
-                    "id":           m["id"],
-                    "question":     m.get("question") or m.get("title", "Unknown"),
-                    "yes_price":    yes_p,
-                    "no_price":     no_p,
-                    "volume":       volume,
-                    "hours_left":   hours_left,
-                    "category":     m.get("category", "Market"),
-                    "condition_id": m.get("conditionId", ""),
+                    "id":         m["id"],
+                    "question":   m.get("question") or m.get("title", "Unknown"),
+                    "yes_price":  yes_p,
+                    "no_price":   no_p,
+                    "volume":     volume,
+                    "hours_left": hours_left,
+                    "category":   m.get("category", "Market"),
                 })
         except Exception as e:
-            log.warning(f"Market fetch error ({url[:50]}...): {e}")
+            log.warning(f"Fetch error: {e}")
 
-    # Sort by soonest ending first
     markets.sort(key=lambda m: m["hours_left"])
-
-    # Filter to payout window
     max_hours = MAX_PAYOUT_DAYS * 24
-    fast = [m for m in markets if m["hours_left"] <= max_hours]
-    log.info(f"Fetched {len(markets)} markets total, {len(fast)} within {max_hours:.0f}h window")
-    return fast[:20]   # Analyze top 20 soonest
+    filtered  = [m for m in markets if m["hours_left"] <= max_hours]
+    log.info(f"Fetched {len(markets)} markets, {len(filtered)} in window")
+    return filtered[:20]
 
 
-# ── AI analysis via Claude ───────────────────────────────────────────────────
-def analyze_market(m: dict) -> dict:
-    if not ANTHROPIC_API_KEY:
-        return _heuristic(m)
-
-    hours = m["hours_left"]
-    if hours < 1:
-        time_label = f"{int(hours*60)} minutes"
-    elif hours < 24:
-        time_label = f"{hours:.1f} hours"
-    else:
-        time_label = f"{hours/24:.1f} days"
-
-    prompt = f"""You are a strict prediction market analyst for a bot targeting FAST PAYOUTS.
-
-Market: "{m['question']}"
-YES: {m['yes_price']*100:.0f}%, NO: {m['no_price']*100:.0f}%
-Volume: ${m['volume']/1000:.0f}k | Resolves in: {time_label} | Category: {m['category']}
-
-Scoring (7+ = tradeable):
-- 9-10: 75%+ one side, high volume, resolves in hours — near certain
-- 7-8: 65-75% one side, decent volume, resolves soon — good edge
-- 5-6: 55-65% — too close, SKIP
-- 1-4: Low volume or very unclear — SKIP
-
-Fast resolution is a big bonus to the score.
-Respond ONLY with valid JSON, no markdown, no extra text:
-{{"score":8,"recommendation":"BUY_YES","confidence":72,"reason":"brief reason under 8 words","edge":"brief edge under 6 words"}}
-recommendation must be exactly BUY_YES, BUY_NO, or SKIP."""
-
-    try:
-        r = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key":         ANTHROPIC_API_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type":      "application/json",
-            },
-            json={
-                "model":      "claude-haiku-4-5",  # Fast + cheap
-                "max_tokens": 200,
-                "messages":   [{"role": "user", "content": prompt}],
-            },
-            timeout=20,
-        )
-        if not r.ok:
-            log.warning(f"API error {r.status_code}: {r.text[:200]}")
-            return _heuristic(m)
-        text = "".join(b.get("text", "") for b in r.json().get("content", []))
-        text = text.replace("```json", "").replace("```", "").strip()
-        result = json.loads(text)
-        if result.get("score", 0) < MIN_SCORE:
-            result["recommendation"] = "SKIP"
-        return result
-    except Exception as e:
-        log.warning(f"AI analysis failed: {e} — using heuristic")
-        return _heuristic(m)
-
-
-def _heuristic(m: dict) -> dict:
-    """Fallback scoring when AI is unavailable."""
-    yp, np = m["yes_price"], m["no_price"]
-    fast    = m["hours_left"] <= 24
-    vol     = m["volume"] > 150_000
+def score_market(m: dict) -> dict:
+    """
+    Pure heuristic scoring — no AI needed.
+    Scores based on: how one-sided the odds are + volume + time to resolve.
+    """
+    yp       = m["yes_price"]
+    np       = m["no_price"]
     dominant = max(yp, np)
-    vhc     = dominant > 0.75
-    hc      = dominant > 0.65
+    side     = "BUY_YES" if yp > np else "BUY_NO"
 
-    score = 1
-    score += 3 if fast else 0
-    score += 2 if vol  else 0
-    score += 2 if hc   else 0
-    score += 2 if vhc  else 0
-    score = min(10, score)
-
-    if dominant > 0.65:
-        rec = "BUY_YES" if yp > np else "BUY_NO"
+    # Base score from odds dominance
+    if dominant >= 0.85:
+        score = 9
+    elif dominant >= 0.78:
+        score = 8
+    elif dominant >= 0.70:
+        score = 7
+    elif dominant >= 0.65:
+        score = 6
+    elif dominant >= 0.60:
+        score = 5
+    elif dominant >= 0.55:
+        score = 4
     else:
-        rec = "SKIP"
+        score = 2   # Too close to call
 
+    # Bonus for fast resolution
+    if m["hours_left"] <= 6:
+        score = min(10, score + 2)
+    elif m["hours_left"] <= 24:
+        score = min(10, score + 1)
+
+    # Bonus for high volume (more reliable odds)
+    if m["volume"] >= 500_000:
+        score = min(10, score + 1)
+    elif m["volume"] >= 200_000:
+        score = min(10, score + 0)
+
+    # Only trade if one side has clear edge
+    rec = side if dominant >= 0.60 else "SKIP"
+    if score < MIN_SCORE:
+        rec = "SKIP"
 
     return {
         "score":          score,
         "recommendation": rec,
         "confidence":     int(dominant * 100),
-        "reason":         "Strong edge, fast close" if vhc else "Good edge, quick payout" if hc else "Low edge",
-        "edge":           "High liquidity" if vol else "Building volume",
+        "reason":         f"{int(dominant*100)}% edge, {m['hours_left']:.0f}h left",
+        "edge":           f"${m['volume']/1000:.0f}k volume",
     }
 
 
-# ── Trade management ─────────────────────────────────────────────────────────
 def can_trade() -> bool:
     return (
         not state["daily_stopped"]
@@ -253,9 +204,8 @@ def place_trade(m: dict, analysis: dict) -> bool:
     ep   = m["yes_price"] if side == "YES" else m["no_price"]
     ep   = max(0.01, min(0.99, ep))
 
-    # Kelly fraction sizing
     conf  = analysis["confidence"] / 100
-    edge  = conf - (1 - conf) / max(0.01, (1 / ep - 1))
+    edge  = max(0.01, conf - (1 - conf) / max(0.01, (1 / ep - 1)))
     kf    = max(0.05, min(0.12, edge))
     size  = round(min(MAX_TRADE_USDC, max(MIN_TRADE_USDC, state["balance"] * kf)), 2)
 
@@ -263,68 +213,69 @@ def place_trade(m: dict, analysis: dict) -> bool:
     sl = max(0.05, ep * STOP_LOSS_MULT)
 
     trade = {
-        "id":           f"t_{int(time.time()*1000)}",
-        "market_id":    m["id"],
-        "question":     m["question"],
-        "side":         side,
-        "entry_price":  ep,
-        "current_price":ep,
-        "size":         size,
-        "shares":       size / ep,
-        "take_profit":  tp,
-        "stop_loss":    sl,
-        "score":        analysis["score"],
-        "confidence":   analysis["confidence"],
-        "reason":       analysis.get("reason", ""),
-        "hours_left":   m["hours_left"],
-        "open_time":    datetime.now(timezone.utc).isoformat(),
-        "category":     m["category"],
+        "id":            f"t_{int(time.time()*1000)}",
+        "market_id":     m["id"],
+        "question":      m["question"],
+        "side":          side,
+        "entry_price":   ep,
+        "current_price": ep,
+        "size":          size,
+        "shares":        size / ep,
+        "take_profit":   tp,
+        "stop_loss":     sl,
+        "score":         analysis["score"],
+        "confidence":    analysis["confidence"],
+        "reason":        analysis.get("reason", ""),
+        "hours_left":    m["hours_left"],
+        "open_time":     datetime.now(timezone.utc).isoformat(),
+        "category":      m["category"],
     }
 
-    state["balance"]         -= size
-    state["balance"]          = round(state["balance"], 4)
+    state["balance"]          -= size
+    state["balance"]           = round(state["balance"], 4)
     state["active_trades"].append(trade)
 
-    mode_tag = "📄 PAPER" if PAPER_MODE else "💰 REAL"
+    mode = "📄 PAPER" if PAPER_MODE else "💰 REAL"
     notify(
-        f"{mode_tag} *Trade Opened*\n"
-        f"Market: {m['question'][:80]}\n"
-        f"Side: {side} @ {ep*100:.0f}¢\n"
+        f"{mode} *Trade Opened!*\n"
+        f"📊 {m['question'][:80]}\n"
+        f"Side: *{side}* @ {ep*100:.0f}¢\n"
         f"Size: ${size:.2f} | Score: {analysis['score']}/10\n"
+        f"Confidence: {analysis['confidence']}%\n"
         f"Payout in: {m['hours_left']:.1f}h\n"
-        f"TP: {tp*100:.0f}¢ | SL: {sl*100:.0f}¢\n"
-        f"Reason: {analysis.get('reason','')}"
+        f"TP: {tp*100:.0f}¢ | SL: {sl*100:.0f}¢"
     )
-    log.info(f"TRADE OPENED: {side} {m['question'][:60]} | ${size:.2f} @ {ep*100:.0f}¢")
+    log.info(
+        f"✅ TRADE OPENED: {side} | {m['question'][:55]} "
+        f"| ${size:.2f} @ {ep*100:.0f}¢ | Score {analysis['score']}/10"
+    )
     return True
 
 
-def simulate_price_move(trade: dict) -> float:
-    """Paper mode: simulate realistic price movement."""
+def simulate_price(trade: dict) -> float:
     import random
     bias  = (trade["confidence"] / 100 - 0.44) * 0.07
     noise = (random.random() - 0.5) * 0.11
-    new_price = trade["current_price"] + bias + noise
-    return max(0.02, min(0.98, new_price))
+    return max(0.02, min(0.98, trade["current_price"] + bias + noise))
 
 
 def update_trades():
-    """Check all active trades for TP/SL hits."""
     closed = []
     for trade in state["active_trades"]:
         if PAPER_MODE:
-            trade["current_price"] = simulate_price_move(trade)
-        # else: fetch real price from Polymarket API here
+            trade["current_price"] = simulate_price(trade)
 
         cp = trade["current_price"]
         if cp >= trade["take_profit"]:
-            close_trade(trade, "WIN", "Take profit hit ✓")
+            close_trade(trade, "WIN", "Take profit ✓")
             closed.append(trade["id"])
         elif cp <= trade["stop_loss"]:
-            close_trade(trade, "LOSS", "Stop loss hit ✗")
+            close_trade(trade, "LOSS", "Stop loss ✗")
             closed.append(trade["id"])
 
-    state["active_trades"] = [t for t in state["active_trades"] if t["id"] not in closed]
+    state["active_trades"] = [
+        t for t in state["active_trades"] if t["id"] not in closed
+    ]
 
 
 def close_trade(trade: dict, result: str, reason: str):
@@ -340,99 +291,120 @@ def close_trade(trade: dict, result: str, reason: str):
         if state["daily_losses"] >= MAX_DAILY_LOSSES:
             state["daily_stopped"] = True
             notify(
-                "🛑 *Daily loss limit reached!*\n"
-                f"2 losses today — bot paused to protect capital.\n"
+                "🛑 *Daily loss limit hit!*\n"
+                f"2 losses today — paused to protect capital.\n"
                 f"Balance: ${state['balance']:.2f}\n"
-                "Will auto-resume tomorrow."
+                "Resumes tomorrow automatically."
             )
 
-    record = {**trade, "exit_price": trade["current_price"], "pnl": pnl, "result": result, "reason": reason, "close_time": datetime.now(timezone.utc).isoformat()}
-    state["history"].append(record)
+    state["history"].append({
+        **trade,
+        "exit_price": trade["current_price"],
+        "pnl":        pnl,
+        "result":     result,
+        "reason":     reason,
+        "close_time": datetime.now(timezone.utc).isoformat(),
+    })
 
-    emoji = "✅" if result == "WIN" else "❌"
+    emoji      = "✅" if result == "WIN" else "❌"
     streak_txt = f" 🔥 Streak: {state['streak']}" if state["streak"] >= 2 else ""
     notify(
         f"{emoji} *Trade {result}*{streak_txt}\n"
-        f"Market: {trade['question'][:70]}\n"
+        f"{trade['question'][:70]}\n"
         f"P&L: {'+'if pnl>=0 else ''}{pnl:.3f} USDC\n"
         f"Balance: ${state['balance']:.2f}\n"
-        f"Reason: {reason}"
+        f"{reason}"
     )
-    log.info(f"TRADE {result}: {trade['question'][:60]} | PnL: {pnl:+.3f} | Balance: ${state['balance']:.2f}")
+    log.info(
+        f"{'✅' if result=='WIN' else '❌'} TRADE {result}: "
+        f"{trade['question'][:50]} | PnL: {pnl:+.3f} | "
+        f"Balance: ${state['balance']:.2f}"
+    )
 
 
-# ── Stats summary ─────────────────────────────────────────────────────────────
 def print_stats():
     wins  = sum(1 for t in state["history"] if t["result"] == "WIN")
     total = len(state["history"])
-    total_pnl = sum(t["pnl"] for t in state["history"])
-    tv    = state["balance"] + sum(t["shares"] * t["current_price"] for t in state["active_trades"])
-    log.info(
-        f"📊 Stats | Balance: ${tv:.2f} | P&L: {total_pnl:+.2f} | "
-        f"Trades: {total} | Win rate: {wins/total*100:.0f}% | "
-        f"Streak: {state['streak']} | Daily losses: {state['daily_losses']}/2"
-        if total else
-        f"📊 Stats | Balance: ${state['balance']:.2f} | No trades yet"
+    pnl   = sum(t["pnl"] for t in state["history"])
+    tv    = state["balance"] + sum(
+        t["shares"] * t["current_price"] for t in state["active_trades"]
     )
+    if total:
+        log.info(
+            f"📊 Balance: ${tv:.2f} | P&L: {pnl:+.2f} | "
+            f"Trades: {total} | WR: {wins/total*100:.0f}% | "
+            f"Streak: {state['streak']} | Daily losses: {state['daily_losses']}/2"
+        )
+    else:
+        log.info(f"📊 Balance: ${state['balance']:.2f} | No trades yet | Scans: {state['total_scans']}")
 
 
-# ── Main loop ────────────────────────────────────────────────────────────────
 def main():
     log.info("=" * 55)
-    log.info("  Polymarket AI Bot v4 — Starting up")
-    log.info(f"  Mode: {'📄 PAPER (no real money)' if PAPER_MODE else '💰 LIVE'}")
-    log.info(f"  Min score: {MIN_SCORE}+ | Max payout: {MAX_PAYOUT_DAYS}d")
-    log.info(f"  Max risk: ${MAX_TRADE_USDC}/trade | Daily stop: {MAX_DAILY_LOSSES} losses")
+    log.info("  Polymarket AI Bot v5 — Starting up")
+    log.info(f"  Mode: {'📄 PAPER' if PAPER_MODE else '💰 LIVE'}")
+    log.info(f"  Min score: {MIN_SCORE}+ | Window: {MAX_PAYOUT_DAYS}d")
+    log.info(f"  Max risk: ${MAX_TRADE_USDC}/trade | Stop: {MAX_DAILY_LOSSES} losses/day")
     log.info("=" * 55)
 
     notify(
-        f"🤖 *Polymarket Bot Started*\n"
-        f"Mode: {'Paper' if PAPER_MODE else 'LIVE'} | Balance: ${state['balance']:.2f}\n"
-        f"Min score: {MIN_SCORE}+ | Scan every: {SCAN_INTERVAL}s"
+        f"🤖 *Polymarket Bot v5 Started!*\n"
+        f"Mode: {'Paper' if PAPER_MODE else 'LIVE'}\n"
+        f"Balance: ${state['balance']:.2f}\n"
+        f"Min score: {MIN_SCORE}+ | Scanning every {SCAN_INTERVAL}s"
     )
 
-    scan_counter = 0
+    tick = 0
     while True:
         try:
             check_daily_reset()
             update_trades()
+            tick += 1
 
-            scan_counter += 1
-            if scan_counter % 6 == 0:   # Print stats every ~5 mins
+            if tick % 6 == 0:
                 print_stats()
 
             if state["daily_stopped"]:
-                log.info("Daily loss limit hit — skipping scan, waiting for tomorrow")
+                log.info("Daily limit hit — waiting for tomorrow...")
                 time.sleep(SCAN_INTERVAL)
                 continue
 
-            log.info(f"🔍 Scan #{state['total_scans']+1} starting...")
+            log.info(f"🔍 Scan #{state['total_scans']+1}...")
             markets = fetch_markets()
             state["total_scans"] += 1
 
-            trades_placed = 0
+            placed = 0
             for m in markets:
                 if not can_trade():
                     break
 
-                log.info(f"  Analyzing: {m['question'][:60]} ({m['hours_left']:.1f}h left)")
-                analysis = analyze_market(m)
-                log.info(f"  Score: {analysis['score']}/10 | Rec: {analysis['recommendation']} | Conf: {analysis['confidence']}%")
+                analysis = score_market(m)
+                log.info(
+                    f"  {m['question'][:55]} | "
+                    f"Score: {analysis['score']}/10 | "
+                    f"Rec: {analysis['recommendation']} | "
+                    f"Conf: {analysis['confidence']}% | "
+                    f"{m['hours_left']:.0f}h left"
+                )
 
-                if analysis["score"] >= MIN_SCORE and analysis["recommendation"] != "SKIP":
+                if analysis["recommendation"] != "SKIP":
                     if place_trade(m, analysis):
-                        trades_placed += 1
+                        placed += 1
 
-                time.sleep(0.5)   # Be polite to APIs
+                time.sleep(0.3)
 
-            log.info(f"✅ Scan complete — {trades_placed} trades placed | {len(state['active_trades'])} open | Balance: ${state['balance']:.2f}")
+            log.info(
+                f"✅ Scan done — {placed} trades placed | "
+                f"{len(state['active_trades'])} open | "
+                f"Balance: ${state['balance']:.2f}"
+            )
 
         except KeyboardInterrupt:
-            log.info("Bot stopped by user")
+            log.info("Bot stopped.")
             notify("⚠️ Bot stopped manually.")
             break
         except Exception as e:
-            log.error(f"Main loop error: {e}", exc_info=True)
+            log.error(f"Error: {e}", exc_info=True)
             time.sleep(10)
 
         time.sleep(SCAN_INTERVAL)
