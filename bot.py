@@ -26,14 +26,14 @@ PAPER_MODE        = os.environ.get("PAPER_MODE", "true").lower() == "true"
 
 # ── Strategy settings ────────────────────────────────────────────────────────
 MIN_SCORE         = 7          # Minimum AI score to trade (7+)
-MAX_PAYOUT_DAYS   = 1.0        # Only markets resolving within 1 day
+MAX_PAYOUT_DAYS   = 3.0        # Only markets resolving within 3 days
 MAX_DAILY_LOSSES  = 2          # Stop trading after 2 losses per day
 MAX_OPEN_TRADES   = 3          # Max simultaneous positions
 MAX_TRADE_USDC    = 1.50       # Max $ per trade
 MIN_TRADE_USDC    = 0.50       # Min $ per trade
 TAKE_PROFIT_MULT  = 1.55       # Close at 55% gain
 STOP_LOSS_MULT    = 0.50       # Close at 50% loss
-MIN_VOLUME        = 50_000     # Minimum market volume $
+MIN_VOLUME        = 10_000     # Minimum market volume $
 SCAN_INTERVAL     = 50         # Seconds between scans
 
 # ── State ────────────────────────────────────────────────────────────────────
@@ -181,13 +181,15 @@ recommendation must be exactly BUY_YES, BUY_NO, or SKIP."""
                 "content-type":      "application/json",
             },
             json={
-                "model":      "claude-haiku-4-5-20251001",  # Fast + cheap
+                "model":      "claude-haiku-4-5",  # Fast + cheap
                 "max_tokens": 200,
                 "messages":   [{"role": "user", "content": prompt}],
             },
             timeout=20,
         )
-        r.raise_for_status()
+        if not r.ok:
+            log.warning(f"API error {r.status_code}: {r.text[:200]}")
+            return _heuristic(m)
         text = "".join(b.get("text", "") for b in r.json().get("content", []))
         text = text.replace("```json", "").replace("```", "").strip()
         result = json.loads(text)
