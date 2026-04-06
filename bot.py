@@ -25,7 +25,7 @@ TELEGRAM_CHAT_ID  = os.environ.get("TELEGRAM_CHAT_ID", "")
 PAPER_MODE        = os.environ.get("PAPER_MODE", "true").lower() == "true"
 
 # ── Strategy settings ────────────────────────────────────────────────────────
-MIN_SCORE         = 5          # Minimum AI score to trade (7+)
+MIN_SCORE         = 3          # Minimum AI score to trade (7+)
 MAX_PAYOUT_DAYS   = 30.0     # Only markets resolving within 3 days
 MAX_DAILY_LOSSES  = 2          # Stop trading after 2 losses per day
 MAX_OPEN_TRADES   = 3          # Max simultaneous positions
@@ -222,8 +222,6 @@ def _heuristic(m: dict) -> dict:
     else:
         rec = "SKIP"
 
-    if score < MIN_SCORE:
-        rec = "SKIP"
 
     return {
         "score":          score,
