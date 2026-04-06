@@ -26,14 +26,14 @@ PAPER_MODE        = os.environ.get("PAPER_MODE", "true").lower() == "true"
 
 # ── Strategy settings ────────────────────────────────────────────────────────
 MIN_SCORE         = 7          # Minimum AI score to trade (7+)
-MAX_PAYOUT_DAYS   = 30.0       # Only markets resolving within 3 days
+MAX_PAYOUT_DAYS   = 2.0       # Only markets resolving within 3 days
 MAX_DAILY_LOSSES  = 2          # Stop trading after 2 losses per day
 MAX_OPEN_TRADES   = 3          # Max simultaneous positions
 MAX_TRADE_USDC    = 1.50       # Max $ per trade
 MIN_TRADE_USDC    = 0.50       # Min $ per trade
 TAKE_PROFIT_MULT  = 1.55       # Close at 55% gain
 STOP_LOSS_MULT    = 0.50       # Close at 50% loss
-MIN_VOLUME        = 1_000     # Minimum market volume $
+MIN_VOLUME        = 5_000    # Minimum market volume $
 SCAN_INTERVAL     = 50         # Seconds between scans
 
 # ── State ────────────────────────────────────────────────────────────────────
