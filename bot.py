@@ -98,17 +98,37 @@ def setup_client():
 
 
 def get_real_balance() -> float:
+    """Get real USDC balance from Polymarket via REST API."""
     try:
-        if not state["client"]:
-            return state["balance"]
-        # Get balance from Polymarket CLOB API
-        bal = state["client"].get_balance()
-        if isinstance(bal, dict):
-            usdc = bal.get("USDC", bal.get("usdc", 0))
-            return round(float(usdc), 4)
-        return round(float(bal), 4)
+        # Derive wallet address from private key
+        from eth_account import Account
+        acct    = Account.from_key(PRIVATE_KEY)
+        address = acct.address.lower()
+
+        # Query Polymarket data API for balance
+        r = requests.get(
+            f"https://data-api.polymarket.com/value?user={address}",
+            timeout=10
+        )
+        if r.ok:
+            data = r.json()
+            bal  = float(data.get("portfolioValue", data.get("cashBalance", 0)))
+            log.info(f"Wallet: {address[:10]}... | Balance: ${bal:.2f}")
+            return round(bal, 4)
+
+        # Fallback: check CLOB API
+        r2 = requests.get(
+            f"{CLOB_API}/accounts?address={address}",
+            timeout=10
+        )
+        if r2.ok:
+            data2 = r2.json()
+            bal2  = float(data2.get("usdcBalance", data2.get("balance", 0)))
+            return round(bal2, 4)
+
+        return state["balance"]
     except Exception as e:
-        log.warning(f"Balance error: {e} - using last known balance")
+        log.warning(f"Balance error: {e} — using last known: ${state['balance']:.2f}")
         return state["balance"]
 
 
