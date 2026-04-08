@@ -77,13 +77,19 @@ def notify(msg: str):
 def setup_client():
     try:
         from py_clob_client.client import ClobClient
+        from eth_account import Account
         if not PRIVATE_KEY:
             log.error("No PRIVATE_KEY set in Railway Variables!")
             return None
+        wallet = Account.from_key(PRIVATE_KEY).address
+        log.info(f"Wallet address: {wallet}")
+        # signature_type=0 = standard MetaMask/EOA wallet
         client = ClobClient(
             host=CLOB_API,
             chain_id=CHAIN_ID,
             key=PRIVATE_KEY,
+            signature_type=0,
+            funder=wallet,
         )
         creds = client.create_or_derive_api_creds()
         client.set_api_creds(creds)
@@ -98,37 +104,16 @@ def setup_client():
 
 
 def get_real_balance() -> float:
-    """Get real USDC balance from Polymarket via REST API."""
+    """get_balance() returns USDC in wei — divide by 1,000,000."""
     try:
-        # Derive wallet address from private key
-        from eth_account import Account
-        acct    = Account.from_key(PRIVATE_KEY)
-        address = acct.address.lower()
-
-        # Query Polymarket data API for balance
-        r = requests.get(
-            f"https://data-api.polymarket.com/value?user={address}",
-            timeout=10
-        )
-        if r.ok:
-            data = r.json()
-            bal  = float(data.get("portfolioValue", data.get("cashBalance", 0)))
-            log.info(f"Wallet: {address[:10]}... | Balance: ${bal:.2f}")
-            return round(bal, 4)
-
-        # Fallback: check CLOB API
-        r2 = requests.get(
-            f"{CLOB_API}/accounts?address={address}",
-            timeout=10
-        )
-        if r2.ok:
-            data2 = r2.json()
-            bal2  = float(data2.get("usdcBalance", data2.get("balance", 0)))
-            return round(bal2, 4)
-
-        return state["balance"]
+        if not state["client"]:
+            return state["balance"]
+        balance_wei  = state["client"].get_balance()
+        balance_usdc = int(balance_wei) / 1_000_000
+        log.info(f"Balance: {balance_wei} wei = ${balance_usdc:.4f} USDC")
+        return round(balance_usdc, 4)
     except Exception as e:
-        log.warning(f"Balance error: {e} — using last known: ${state['balance']:.2f}")
+        log.warning(f"Balance error: {e} — using ${state['balance']:.2f}")
         return state["balance"]
 
 
