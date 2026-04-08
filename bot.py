@@ -101,10 +101,14 @@ def get_real_balance() -> float:
     try:
         if not state["client"]:
             return state["balance"]
-        bal = state["client"].get_usdc_balance()
+        # Get balance from Polymarket CLOB API
+        bal = state["client"].get_balance()
+        if isinstance(bal, dict):
+            usdc = bal.get("USDC", bal.get("usdc", 0))
+            return round(float(usdc), 4)
         return round(float(bal), 4)
     except Exception as e:
-        log.warning(f"Balance error: {e}")
+        log.warning(f"Balance error: {e} - using last known balance")
         return state["balance"]
 
 
