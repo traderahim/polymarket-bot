@@ -101,8 +101,8 @@ def get_real_balance() -> float:
     try:
         if not state["client"]:
             return state["balance"]
-        bal = state["client"].get_balance()
-        return round(float(bal) / 1_000_000, 4)
+       bal = state["client"].get_usdc_balance()
+return round(float(bal), 4)
     except Exception as e:
         log.warning(f"Balance error: {e}")
         return state["balance"]
